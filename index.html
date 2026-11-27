@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>라투라 트리플 - v0.27</title>
+<title>라투라 트리플 - v0.28</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Jua&display=swap" rel="stylesheet">
@@ -256,6 +256,11 @@ button.ui-bounce{animation:uiBounce .17s cubic-bezier(.2,.65,.35,1) both}
 .arcade-row.first{background:#fff1cb}.arcade-row.second{background:#edf0f5}.arcade-row.third{background:#f7e8dc}
 .modal .arcade-note{font-size:12px;margin:9px 0;color:#627e95}.modal #closeRanks{font-size:19px;min-height:46px}
 @media(max-width:350px){.arcade-row{grid-template-columns:24px minmax(0,1fr) 37px minmax(58px,auto);gap:4px;font-size:13px;padding-inline:5px}}
+
+/* v0.28: separate topmost, input-transparent tap animation surface. */
+.board .tap-fx-layer{position:absolute;inset:0;z-index:100000;pointer-events:none;overflow:visible}
+.board .tap-fx-layer .tile-tap-ghost{position:absolute!important;z-index:0!important;pointer-events:none!important;animation:tileTapBounce .16s ease-out both;transition:none!important;will-change:transform,opacity}
+@media(prefers-reduced-motion:reduce){.board .tap-fx-layer{display:none}}
 </style>
 </head>
 <body>
@@ -364,7 +369,6 @@ function boardGrid(){
 function spiralSlots(cols,rows,total){
  const path=[],seen=new Set();
  function add(x,y){if(x<0||y<0||x>=cols||y>=rows)return;const k=x+','+y;if(!seen.has(k)){seen.add(k);path.push({x,y})}}
- // Start at the upper-left corner and walk clockwise around the outside.
  for(let x=0;x<cols;x++)add(x,0);
  for(let y=1;y<rows;y++)add(cols-1,y);
  for(let x=cols-2;x>=0;x--)add(x,rows-1);
@@ -376,40 +380,70 @@ function spiralSlots(cols,rows,total){
    if(cols>=7&&rows>=7){for(let x=cols-4;x>=2;x--)add(x,rows-3);for(let y=rows-4;y>=4;y--)add(2,y)}
   }else{add(1,2)}
  }
- // Base layer traces the whole path; surplus goes upward, never into the gap.
- const slots=path.slice(0,total).map(p=>({...p,layer:0}));
- for(let layer=1;slots.length<total;layer++){
-  const shift=layer%2?.14:0;
-  let candidates=path.map(p=>({x:p.x+shift,y:p.y+shift,layer})).filter(p=>p.x+1<=cols&&p.y+1<=rows);
-  if(!candidates.length)candidates=path.map(p=>({...p,layer}));
-  const n=Math.min(total-slots.length,candidates.length);
-  // Spread a partial top layer around the spiral rather than clumping it.
-  for(let i=0;i<n;i++)slots.push(candidates[Math.floor((i+.5)*candidates.length/n)]);
+ // Spiral is the sole named exception: every layer uses EXACTLY the original path.
+ const slots=[];
+ for(let layer=0;slots.length<total;layer++){
+  const n=Math.min(total-slots.length,path.length);
+  for(let i=0;i<n;i++)slots.push({...path[layer===0?i:Math.floor((i+.5)*path.length/n)],layer});
  }
  return slots;
 }
+// Fixed silhouette masks in normalized board coordinates. No rank-based overflow.
+function footprint(cols,rows,pattern){
+ const points=[];
+ const cx=(cols-1)/2,cy=(rows-1)/2;
+ for(let y=0;y<rows;y++)for(let x=0;x<cols;x++){
+  const u=(x-cx)/Math.max(1,cx),v=(y-cy)/Math.max(1,cy),a=Math.abs(u),b=Math.abs(v);
+  let ok=false;
+  switch(pattern.name){
+   case '다이아몬드':ok=a+b<=1.16;break;
+   case '피라미드':ok=a<=.20+.80*(v+1)/2;break;
+   case '십자':ok=a<=.36||b<=.27;break;
+   case '엇갈림':ok=(Math.floor(x/2)+Math.floor(y/2))%2===0;break;
+   case '나비':ok=(a>=.32&&b<=.90-.23*(1-a))||(a<.32&&b<=.34);break;
+   case '모래시계':ok=a<=.27+.78*b;break;
+   case '하트':ok=outlineRank((u+1)*3.5,(v+1)*4.25+.35,HEART_POINTS)<=0;break;
+   case '도넛':{const r=Math.hypot(u,v);ok=r>=.44&&r<=1.15;break;}
+  }
+  if(ok)points.push({x,y});
+ }
+ // Small viewports may not resolve an entire silhouette. Retain a safe position.
+ if(!points.length)points.push({x:Math.floor(cx),y:Math.floor(cy)});
+ return points;
+}
 function makeSlots(s){
- const {cols,rows}=boardGrid();
- const total=15+(s-1)*3, pattern=patternFor(s);
+ const {cols,rows}=boardGrid(),total=15+(s-1)*3,pattern=patternFor(s);
  if(pattern.spiral)return spiralSlots(cols,rows,total);
+ const mask=footprint(cols,rows,pattern);
+ const rank=p=>pattern.rank(p.x*7/Math.max(1,cols-1),p.y*9/Math.max(1,rows-1),0);
+ const order=(a,b)=>rank(a)-rank(b)||a.y-b.y||a.x-b.x;
+ // Preserve the early-stage layering plan, then use only the footprint.
  const second=s>=2?Math.min(Math.floor((s-1)/2)*3,Math.floor(total*.35/3)*3):0;
  const third=s>=3?Math.min(Math.floor((s-1)/3)*3,Math.floor(total*.20/3)*3):0;
- const wanted=[total-second-third,second,third];
- const slots=[];let remaining=total;
- for(let layer=0;remaining>0;layer++){
-   const offset=layer%2*.5, candidates=[],previous=slots.filter(q=>q.layer===layer-1);
-   for(let y=offset;y+1<=rows;y++)for(let x=offset;x+1<=cols;x++){
-     const p={x,y,layer};
-     // Upper layers favor positions supported by the layer directly below.
-     const support=layer?previous.filter(q=>overlaps(p,q)).length:0;
-     candidates.push({...p,rank:pattern.rank(x*7/Math.max(1,cols-1),y*9/Math.max(1,rows-1),layer),support});
-   }
-   candidates.sort((a,b)=>(layer?Number(b.support>0)-Number(a.support>0):0)||a.rank-b.rank||b.support-a.support||a.y-b.y||a.x-b.x);
-   const planned=layer<3?wanted[layer]:remaining;
-   // Keep the board compact; extra tiles go into additional layers, not extra rows.
-   const n=Math.min(remaining,planned,Math.max(1,Math.floor(candidates.length*(pattern.fill||.78))),candidates.length);
-   slots.push(...candidates.slice(0,n).map(({x,y,layer})=>({x,y,layer})));
-   remaining-=n;
+ const sorted=mask.slice().sort(order),base=sorted.slice(0,Math.min(mask.length,total-second-third));
+ const key=p=>p.x+','+p.y;
+ const squares=points=>{const k=new Set(points.map(key));return points.filter(({x,y})=>k.has((x+1)+','+y)&&k.has(x+','+(y+1))&&k.has((x+1)+','+(y+1)))};
+ // Reserve one complete 2×2 square when layering is needed, even if an early
+ // stage's rank ordering would otherwise leave only scattered cells.
+ if(base.length<total&&base.length>=4&&!squares(base).length){
+  const q=squares(mask).sort(order)[0];
+  if(q){const required=[q,{x:q.x+1,y:q.y},{x:q.x,y:q.y+1},{x:q.x+1,y:q.y+1}];const keep=new Set(required.map(key));const rest=sorted.filter(p=>!keep.has(key(p)));const n=base.length;base.splice(0,n,...required,...rest.slice(0,n-4));}
+ }
+ const keys=new Set(base.map(key));
+ const joints=[];
+ for(const p of base){const {x,y}=p;
+  if(keys.has((x+1)+','+y)&&keys.has(x+','+(y+1))&&keys.has((x+1)+','+(y+1)))joints.push({x:x+.5,y:y+.5});
+ }
+ joints.sort(order);
+ const slots=base.map(p=>({...p,layer:0}));
+ // Half-cell joints fit completely within the original silhouette. If no 2x2
+ // square fits (e.g. a narrow viewport), use a direct stack rather than fill a hole.
+ for(let layer=1;slots.length<total;layer++){
+  const candidates=layer%2&&joints.length?joints:base;
+  const n=Math.min(total-slots.length,candidates.length);
+  // Spread a partial final layer throughout the footprint.
+  const ordered=candidates.slice().sort((a,b)=>a.y-b.y||a.x-b.x);
+  for(let i=0;i<n;i++)slots.push({...ordered[Math.floor((i+.5)*ordered.length/n)],layer});
  }
  return slots;
 }
@@ -422,7 +456,7 @@ function startStage(){
  shuffle(bag);tiles=slots.map((p,i)=>({...p,id:i,type:bag[i],removed:false}));
  buildBoard();render();say('');
 }
-let tileNodes=new Map(),tileById=new Map(),blockers=new Map(),below=new Map(),remainingTiles=0,resizeFrame=0;
+let tileNodes=new Map(),tileById=new Map(),blockers=new Map(),below=new Map(),remainingTiles=0,resizeFrame=0,tapFxLayer=null;
 function isBlocked(tile){return (blockers.get(tile.id)||0)>0}
 function updateTile(t){
  const el=tileNodes.get(t.id);if(!el)return;
@@ -444,7 +478,8 @@ function buildBoard(){
   const el=document.createElement('button');el.className='tile';el.innerHTML=svg(t.type);el.style.zIndex=1+t.layer;el.dataset.tileId=t.id;
   tileNodes.set(t.id,el);updateTile(t);frag.appendChild(el);
  }
- remainingTiles=active.length;boardEl.appendChild(frag);layoutBoard();
+ remainingTiles=active.length;boardEl.appendChild(frag);
+ tapFxLayer=document.createElement('div');tapFxLayer.className='tap-fx-layer';tapFxLayer.setAttribute('aria-hidden','true');boardEl.appendChild(tapFxLayer);layoutBoard();
 }
 function layoutBoard(){
  if(document.getElementById('gameScreen').hidden||!tiles.length)return;
@@ -489,10 +524,15 @@ function updateActions(){
 function saveUndo(){undoState={tiles:tiles.map(t=>({...t})),tray:[...tray],score,stage}}
 function animateTileTap(el){
  if(!el)return;
- // Reuse the selected element instead of cloning an image or rebuilding the board.
- if(window.matchMedia('(prefers-reduced-motion: reduce)').matches){el.remove();return}
- el.className='tile tile-tap-ghost';el.disabled=true;el.tabIndex=-1;el.setAttribute('aria-hidden','true');el.removeAttribute('title');el.removeAttribute('data-tile-id');
- setTimeout(()=>el.remove(),170);
+ if(window.matchMedia('(prefers-reduced-motion: reduce)').matches||!tapFxLayer){el.remove();return}
+ // A div has no browser-specific disabled-button rendering. Reuse the decoded image node.
+ const ghost=document.createElement('div');ghost.className='tile tile-tap-ghost';
+ ghost.style.left=el.style.left;ghost.style.top=el.style.top;
+ ghost.append(...el.childNodes);el.remove();
+ ghost.addEventListener('animationend',()=>ghost.remove(),{once:true});
+ tapFxLayer.appendChild(ghost);
+ // Safety cleanup only; do not cut the animation off at its nominal duration.
+ setTimeout(()=>ghost.remove(),1000);
 }
 function pick(id){
  if(gameEnded||transitionBusy)return;
