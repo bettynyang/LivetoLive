@@ -355,8 +355,7 @@ const PATTERNS=[
  {name:'나비',rank:(x,y)=>Math.min(Math.hypot((x-1.3)*1.15,(y-3.2)*.85),Math.hypot((x-5.7)*1.15,(y-5.8)*.85))},
  {name:'모래시계',rank:(x,y)=>Math.max(Math.abs(x-3.5)*1.6-Math.abs(y-4.5)*.8,Math.abs(y-4.5)*.9)},
  {name:'하트',fill:.52,rank:(x,y)=>outlineRank(x,y,HEART_POINTS)},
- {name:'도넛',fill:.50,rank:(x,y)=>Math.abs(Math.hypot((x-3.5)/3.5,(y-4.5)/4.5)-.76)},
- {name:'골뱅이',spiral:true}
+ {name:'도넛',fill:.50,rank:(x,y)=>Math.abs(Math.hypot((x-3.5)/3.5,(y-4.5)/4.5)-.76)}
 ];
 function patternFor(s){return PATTERNS[(s-1)%PATTERNS.length]}
 function overlaps(a,b){return Math.abs(a.x-b.x)<1 && Math.abs(a.y-b.y)<1}
@@ -365,85 +364,39 @@ function boardGrid(){
  const size=trayTileSize(),w=boardEl.clientWidth,h=boardEl.clientHeight;
  return {cols:Math.max(1,Math.min(7,Math.floor((w-12)/size))),rows:Math.max(1,Math.min(10,Math.floor((h-16+3)/(size+3))))};
 }
-// A rectangular spiral, with a one-cell-wide empty corridor between turns.
-function spiralSlots(cols,rows,total){
- const path=[],seen=new Set();
- function add(x,y){if(x<0||y<0||x>=cols||y>=rows)return;const k=x+','+y;if(!seen.has(k)){seen.add(k);path.push({x,y})}}
- for(let x=0;x<cols;x++)add(x,0);
- for(let y=1;y<rows;y++)add(cols-1,y);
- for(let x=cols-2;x>=0;x--)add(x,rows-1);
- if(cols>=3&&rows>=4){
-  for(let y=rows-2;y>=2;y--)add(0,y);
-  if(cols>=5){
-   for(let x=1;x<=cols-3;x++)add(x,2);
-   for(let y=3;y<=rows-3;y++)add(cols-3,y);
-   if(cols>=7&&rows>=7){for(let x=cols-4;x>=2;x--)add(x,rows-3);for(let y=rows-4;y>=4;y--)add(2,y)}
-  }else{add(1,2)}
- }
- // Spiral is the sole named exception: every layer uses EXACTLY the original path.
- const slots=[];
- for(let layer=0;slots.length<total;layer++){
-  const n=Math.min(total-slots.length,path.length);
-  for(let i=0;i<n;i++)slots.push({...path[layer===0?i:Math.floor((i+.5)*path.length/n)],layer});
- }
- return slots;
-}
-// Fixed silhouette masks in normalized board coordinates. No rank-based overflow.
-function footprint(cols,rows,pattern){
- const points=[];
- const cx=(cols-1)/2,cy=(rows-1)/2;
- for(let y=0;y<rows;y++)for(let x=0;x<cols;x++){
-  const u=(x-cx)/Math.max(1,cx),v=(y-cy)/Math.max(1,cy),a=Math.abs(u),b=Math.abs(v);
-  let ok=false;
-  switch(pattern.name){
-   case '다이아몬드':ok=a+b<=1.16;break;
-   case '피라미드':ok=a<=.20+.80*(v+1)/2;break;
-   case '십자':ok=a<=.36||b<=.27;break;
-   case '엇갈림':ok=(Math.floor(x/2)+Math.floor(y/2))%2===0;break;
-   case '나비':ok=(a>=.32&&b<=.90-.23*(1-a))||(a<.32&&b<=.34);break;
-   case '모래시계':ok=a<=.27+.78*b;break;
-   case '하트':ok=outlineRank((u+1)*3.5,(v+1)*4.25+.35,HEART_POINTS)<=0;break;
-   case '도넛':{const r=Math.hypot(u,v);ok=r>=.44&&r<=1.15;break;}
-  }
-  if(ok)points.push({x,y});
- }
- // Small viewports may not resolve an entire silhouette. Retain a safe position.
- if(!points.length)points.push({x:Math.floor(cx),y:Math.floor(cy)});
- return points;
-}
 function makeSlots(s){
- const {cols,rows}=boardGrid(),total=15+(s-1)*3,pattern=patternFor(s);
- if(pattern.spiral)return spiralSlots(cols,rows,total);
- const mask=footprint(cols,rows,pattern);
- const rank=p=>pattern.rank(p.x*7/Math.max(1,cols-1),p.y*9/Math.max(1,rows-1),0);
- const order=(a,b)=>rank(a)-rank(b)||a.y-b.y||a.x-b.x;
- // Preserve the early-stage layering plan, then use only the footprint.
+ const {cols,rows}=boardGrid();
+ const total=15+(s-1)*3, pattern=patternFor(s);
+ // Limit density by the original pattern preference, not a fixed footprint.
+ // Keep the first two cycles identical to v0.27's general layout.
+ const caps={'다이아몬드':.60,'피라미드':.60,'십자':.46,'엇갈림':.50,'나비':.56,'모래시계':.55,'하트':.48,'도넛':.44};
+ const cap=s<=16?(pattern.fill||.78):caps[pattern.name];
  const second=s>=2?Math.min(Math.floor((s-1)/2)*3,Math.floor(total*.35/3)*3):0;
  const third=s>=3?Math.min(Math.floor((s-1)/3)*3,Math.floor(total*.20/3)*3):0;
- const sorted=mask.slice().sort(order),base=sorted.slice(0,Math.min(mask.length,total-second-third));
- const key=p=>p.x+','+p.y;
- const squares=points=>{const k=new Set(points.map(key));return points.filter(({x,y})=>k.has((x+1)+','+y)&&k.has(x+','+(y+1))&&k.has((x+1)+','+(y+1)))};
- // Reserve one complete 2×2 square when layering is needed, even if an early
- // stage's rank ordering would otherwise leave only scattered cells.
- if(base.length<total&&base.length>=4&&!squares(base).length){
-  const q=squares(mask).sort(order)[0];
-  if(q){const required=[q,{x:q.x+1,y:q.y},{x:q.x,y:q.y+1},{x:q.x+1,y:q.y+1}];const keep=new Set(required.map(key));const rest=sorted.filter(p=>!keep.has(key(p)));const n=base.length;base.splice(0,n,...required,...rest.slice(0,n-4));}
- }
- const keys=new Set(base.map(key));
- const joints=[];
- for(const p of base){const {x,y}=p;
-  if(keys.has((x+1)+','+y)&&keys.has(x+','+(y+1))&&keys.has((x+1)+','+(y+1)))joints.push({x:x+.5,y:y+.5});
- }
- joints.sort(order);
- const slots=base.map(p=>({...p,layer:0}));
- // Half-cell joints fit completely within the original silhouette. If no 2x2
- // square fits (e.g. a narrow viewport), use a direct stack rather than fill a hole.
- for(let layer=1;slots.length<total;layer++){
-  const candidates=layer%2&&joints.length?joints:base;
-  const n=Math.min(total-slots.length,candidates.length);
-  // Spread a partial final layer throughout the footprint.
-  const ordered=candidates.slice().sort((a,b)=>a.y-b.y||a.x-b.x);
-  for(let i=0;i<n;i++)slots.push({...ordered[Math.floor((i+.5)*ordered.length/n)],layer});
+ const wanted=[total-second-third,second,third];
+ const slots=[];let remaining=total;
+ for(let layer=0;remaining>0;layer++){
+   const offset=cols>=2&&rows>=2?layer%2*.5:0, candidates=[],previous=slots.filter(q=>q.layer===layer-1);
+   for(let y=offset;y+1<=rows;y++)for(let x=offset;x+1<=cols;x++){
+     const p={x,y,layer};
+     // Upper layers favor positions supported by the layer directly below.
+     const support=layer?previous.filter(q=>overlaps(p,q)).length:0;
+     candidates.push({...p,rank:pattern.rank(x*7/Math.max(1,cols-1),y*9/Math.max(1,rows-1),layer),support});
+   }
+   // The candidate rank is a soft outline. Only the best-ranked region is
+   // eligible in later stages; within it preserve the original support/order.
+   if(s>16){
+     const ranked=candidates.slice().sort((a,b)=>a.rank-b.rank||a.y-b.y||a.x-b.x);
+     const limit=Math.max(1,Math.floor(ranked.length*cap));
+     const cutoff=ranked[limit-1].rank;
+     for(let i=candidates.length-1;i>=0;i--)if(candidates[i].rank>cutoff+1e-9)candidates.splice(i,1);
+   }
+   candidates.sort((a,b)=>(layer?Number(b.support>0)-Number(a.support>0):0)||a.rank-b.rank||b.support-a.support||a.y-b.y||a.x-b.x);
+   const planned=layer<3?wanted[layer]:remaining;
+   // Keep the board compact; extra tiles go into additional layers, not extra rows.
+   const n=Math.min(remaining,planned,(s<=16?Math.max(1,Math.floor(candidates.length*cap)):candidates.length),candidates.length);
+   slots.push(...candidates.slice(0,n).map(({x,y,layer})=>({x,y,layer})));
+   remaining-=n;
  }
  return slots;
 }
